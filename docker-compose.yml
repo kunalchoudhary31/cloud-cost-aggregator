@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  cloud-cost-aggregator:
+    build: .
+    image: cloud-cost-aggregator:latest
+    container_name: cloud-cost-aggregator
+    restart: unless-stopped
+    environment:
+      - SENTRY_DSN=https://022c726533e0e25f5f259f5410d4a89e@o992304.ingest.us.sentry.io/4510346151723008
+    command: python main.py
+    networks:
+      - cloud-costs-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  cloud-costs-network:
+    driver: bridge

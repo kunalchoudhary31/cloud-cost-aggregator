@@ -3,7 +3,23 @@ Logging configuration for cloud cost aggregator
 """
 import logging
 import sys
+import os
 from typing import Optional
+
+# Initialize Sentry if DSN is provided
+sentry_initialized = False
+try:
+    import sentry_sdk
+    SENTRY_DSN = os.getenv('SENTRY_DSN')
+    if SENTRY_DSN:
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            traces_sample_rate=1.0,
+            profiles_sample_rate=1.0,
+        )
+        sentry_initialized = True
+except ImportError:
+    pass
 
 
 def setup_logger(
