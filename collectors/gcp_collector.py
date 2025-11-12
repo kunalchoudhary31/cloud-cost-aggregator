@@ -136,7 +136,7 @@ class GCPCollector(BaseCollector):
                   SELECT
                     *
                   FROM
-                    UNNEST(['']) AS fee_sku_id ),
+                    UNNEST(['5515-81A8-03A2']) AS fee_sku_id ),
                   cost_data AS (
                   SELECT
                     *,
@@ -154,14 +154,14 @@ class GCPCollector(BaseCollector):
                       FROM
                         UNNEST(credits) c
                       WHERE
-                        c.type IN ('')), 0) AS `cud_credits`,
+                        c.type IN ('FEE_UTILIZATION_OFFSET')), 0) AS `cud_credits`,
                     IFNULL( (
                       SELECT
                         SUM(CAST(c.amount AS NUMERIC))
                       FROM
                         UNNEST(credits) c
                       WHERE
-                        c.type IN ('')), 0) AS `other_savings`
+                        c.type IN ('SUSTAINED_USAGE_DISCOUNT', 'DISCOUNT')), 0) AS `other_savings`
                   FROM
                     `{self.config.project_id}.{self.config.bigquery_dataset}.gcp_billing_export_v1_*`
                   WHERE
