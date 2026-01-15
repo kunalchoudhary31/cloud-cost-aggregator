@@ -161,14 +161,37 @@ class Config:
             errors.append("GCP_CREDENTIALS_PATH or GOOGLE_APPLICATION_CREDENTIALS is required")
 
         # Validate Azure config
-        if not self.azure.tenant_id:
-            errors.append("AZURE_TENANT_ID is required")
-        if not self.azure.client_id:
-            errors.append("AZURE_CLIENT_ID is required")
-        if not self.azure.client_secret:
-            errors.append("AZURE_CLIENT_SECRET is required")
-        if not self.azure.subscription_id:
-            errors.append("AZURE_SUBSCRIPTION_ID is required")
+        # For paid accounts: need service principal credentials
+        # For sponsorship accounts: need cookies
+        has_service_principal = (
+            self.azure.tenant_id and 
+            self.azure.client_id and 
+            self.azure.client_secret and 
+            self.azure.subscription_id
+        )
+        has_cookies = bool(self.azure.sponsorship_cookies)
+        
+        if not has_service_principal and not has_cookies:
+            errors.append(
+                "Azure configuration requires either:\n"
+                "  - Service principal credentials (AZURE_TENANT_ID, AZURE_CLIENT_ID, "
+                "AZURE_CLIENT_SECRET, AZURE_SUBSCRIPTION_ID) for paid accounts, OR\n"
+                "  - AZURE_SPONSORSHIP_COOKIES for sponsorship accounts"
+            )
+        elif has_service_principal:
+            # Validate all service principal fields are present
+            if not self.azure.tenant_id:
+                errors.append("AZURE_TENANT_ID is required for paid accounts")
+            if not self.azure.client_id:
+                errors.append("AZURE_CLIENT_ID is required for paid accounts")
+            if not self.azure.client_secret:
+                errors.append("AZURE_CLIENT_SECRET is required for paid accounts")
+            if not self.azure.subscription_id:
+                errors.append("AZURE_SUBSCRIPTION_ID is required")
+        elif has_cookies:
+            # For sponsorship, subscription_id is still needed
+            if not self.azure.subscription_id:
+                errors.append("AZURE_SUBSCRIPTION_ID is required for sponsorship accounts")
 
         return errors
 

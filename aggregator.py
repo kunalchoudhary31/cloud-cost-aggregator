@@ -5,6 +5,7 @@ from datetime import date
 from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import sys
 
 from sqlalchemy.dialects.postgresql import insert
 
@@ -15,8 +16,9 @@ from collectors.azure_collector import AzureCollector
 from database.connection import DatabaseManager
 from database.models import CloudCost
 from config import Config
+from utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger('cloud_cost_aggregator')
 
 
 class CostAggregator:
@@ -36,12 +38,50 @@ class CostAggregator:
         self.config = config
         self.db_manager = db_manager
 
-        # Initialize collectors
-        self.collectors = {
-            'aws': AWSCollector(config.aws),
-            'gcp': GCPCollector(config.gcp),
-            'azure': AzureCollector(config.azure)
+        # Lazy initialization - collectors will be created when needed
+        self._collectors = {}
+        self._collector_classes = {
+            'aws': AWSCollector,
+            'gcp': GCPCollector,
+            'azure': AzureCollector
         }
+        self._collector_configs = {
+            'aws': config.aws,
+            'gcp': config.gcp,
+            'azure': config.azure
+        }
+    
+    @property
+    def collectors(self):
+        """Lazy-loaded collectors dictionary"""
+        # Initialize all collectors if not already done
+        if not self._collectors:
+            for provider, collector_class in self._collector_classes.items():
+                try:
+                    self._collectors[provider] = collector_class(self._collector_configs[provider])
+                except Exception as e:
+                    logger.warning(f"Failed to initialize {provider} collector: {e}")
+                    # Store None to indicate initialization failure
+                    self._collectors[provider] = None
+        return self._collectors
+    
+    def _get_collector(self, provider: str):
+        """Get a collector for a specific provider, initializing it if needed"""
+        if provider not in self._collectors:
+            if provider not in self._collector_classes:
+                raise ValueError(f"Unknown provider: {provider}")
+            try:
+                self._collectors[provider] = self._collector_classes[provider](
+                    self._collector_configs[provider]
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize {provider} collector: {e}")
+                self._collectors[provider] = None
+        
+        collector = self._collectors.get(provider)
+        if collector is None:
+            raise ValueError(f"Collector for {provider} failed to initialize")
+        return collector
 
     def collect_all_costs(
         self,
@@ -70,28 +110,41 @@ class CostAggregator:
         errors = {}
 
         # Collect costs in parallel
+        logger.info(f"Submitting collection tasks for {len(providers)} provider(s)...")
+        logger.info("Creating ThreadPoolExecutor...")
         with ThreadPoolExecutor(max_workers=3) as executor:
+            logger.info("ThreadPoolExecutor created")
             # Submit collection tasks
-            future_to_provider = {
-                executor.submit(
-                    self._collect_provider_costs,
-                    provider,
-                    start_date,
-                    end_date
-                ): provider
-                for provider in providers
-                if provider in self.collectors
-            }
+            future_to_provider = {}
+            for provider in providers:
+                if provider in self._collector_classes:
+                    logger.info(f"Submitting collection task for {provider.upper()}...")
+                    future = executor.submit(
+                        self._collect_provider_costs,
+                        provider,
+                        start_date,
+                        end_date
+                    )
+                    future_to_provider[future] = provider
+                    logger.info(f"Collection task submitted for {provider.upper()}")
+                else:
+                    logger.warning(f"Skipping unknown provider: {provider}")
 
+            logger.info(f"Waiting for {len(future_to_provider)} collection task(s) to complete...")
+            
             # Gather results as they complete
+            completed = 0
             for future in as_completed(future_to_provider):
                 provider = future_to_provider[future]
+                completed += 1
+                logger.info(f"[{completed}/{len(future_to_provider)}] Processing results for {provider.upper()}...")
                 try:
+                    logger.info(f"Waiting for {provider.upper()} collection to finish...")
                     records = future.result()
                     results[provider] = records
-                    logger.info(f"{provider.upper()}: Collected {len(records)} cost records")
+                    logger.info(f"{provider.upper()}: ✓ Successfully collected {len(records)} cost records")
                 except Exception as e:
-                    logger.error(f"{provider.upper()}: Failed to collect costs: {e}")
+                    logger.error(f"{provider.upper()}: ✗ Failed to collect costs: {e}", exc_info=True)
                     errors[provider] = str(e)
                     results[provider] = []
 
@@ -124,11 +177,17 @@ class CostAggregator:
         Returns:
             List of cost records
         """
-        collector = self.collectors.get(provider)
-        if not collector:
-            raise ValueError(f"Unknown provider: {provider}")
-
-        return collector.collect_costs(start_date, end_date)
+        logger.info(f"[{provider.upper()}] Starting cost collection for date range: {start_date} to {end_date}")
+        try:
+            logger.info(f"[{provider.upper()}] Getting collector instance...")
+            collector = self._get_collector(provider)
+            logger.info(f"[{provider.upper()}] Collector instance obtained, calling collect_costs()...")
+            records = collector.collect_costs(start_date, end_date)
+            logger.info(f"[{provider.upper()}] Collection completed, returning {len(records)} records")
+            return records
+        except Exception as e:
+            logger.error(f"[{provider.upper()}] Error in _collect_provider_costs: {e}", exc_info=True)
+            raise
 
     def save_costs(self, cost_records: List[CostRecord]) -> int:
         """
@@ -196,18 +255,32 @@ class CostAggregator:
         Returns:
             Dictionary with statistics
         """
+        logger.info(">>> ENTERED aggregate_and_store() method")
+        
+        logger.info("=" * 60)
         logger.info(f"Starting cost aggregation for {start_date} to {end_date}")
+        if providers:
+            logger.info(f"Providers to process: {providers}")
+        logger.info("=" * 60)
 
         # Collect costs from all providers
+        logger.info("Step 1: Collecting costs from providers...")
+        logger.info("About to call collect_all_costs()...")
         results = self.collect_all_costs(start_date, end_date, providers)
+        logger.info(f"Step 1 complete: Collected data from {len(results)} provider(s)")
 
         # Flatten all records
+        logger.info("Step 2: Flattening collected records...")
         all_records = []
         for provider, records in results.items():
             all_records.extend(records)
+            logger.info(f"  - {provider.upper()}: {len(records)} records")
+        logger.info(f"Total records to save: {len(all_records)}")
 
         # Save to database
+        logger.info("Step 3: Saving records to database...")
         saved_count = self.save_costs(all_records)
+        logger.info(f"Step 3 complete: Saved {saved_count} record(s) to database")
 
         # Calculate statistics
         stats = {
@@ -223,25 +296,46 @@ class CostAggregator:
             stats[f'{provider}_cost_usd'] = float(total_cost)
             stats[f'{provider}_records'] = len(records)
 
-        logger.info(f"Aggregation complete: {stats}")
+        logger.info("=" * 60)
+        logger.info("Aggregation statistics:")
+        for key, value in stats.items():
+            logger.info(f"  {key}: {value}")
+        logger.info("=" * 60)
+        logger.info("Cost aggregation completed successfully")
 
         return stats
 
-    def test_all_connections(self) -> Dict[str, bool]:
+    def test_all_connections(self, providers: List[str] = None) -> Dict[str, bool]:
         """
-        Test connections to all cloud providers
+        Test connections to cloud providers
+
+        Args:
+            providers: Optional list of provider names to test.
+                      If None, test all providers
 
         Returns:
             Dictionary mapping provider to connection status
         """
-        logger.info("Testing connections to all cloud providers")
+        if providers is None:
+            providers = ['aws', 'gcp', 'azure']
+        
+        logger.info(f"Testing connections to providers: {providers}")
 
         results = {}
-        for provider, collector in self.collectors.items():
+        for provider in providers:
+            if provider not in self._collector_classes:
+                logger.warning(f"Unknown provider: {provider}, skipping")
+                results[provider] = False
+                continue
+            
             try:
+                logger.info(f"Initializing {provider.upper()} collector...")
+                collector = self._get_collector(provider)
+                logger.info(f"Testing {provider.upper()} connection...")
                 results[provider] = collector.test_connection()
+                logger.info(f"{provider.upper()} connection test completed: {results[provider]}")
             except Exception as e:
-                logger.error(f"{provider.upper()}: Connection test error: {e}")
+                logger.error(f"{provider.upper()}: Connection test error: {e}", exc_info=True)
                 results[provider] = False
 
         return results

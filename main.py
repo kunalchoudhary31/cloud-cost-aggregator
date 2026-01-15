@@ -122,12 +122,21 @@ def main():
         sys.exit(1)
 
     # Initialize aggregator
+    logger.info("Creating CostAggregator instance...")
     aggregator = CostAggregator(config, db_manager)
+    logger.info("CostAggregator instance created successfully")
 
     # Handle --test-connections flag
     if args.test_connections:
         logger.info("Testing cloud provider connections...")
-        results = aggregator.test_all_connections()
+        
+        # Parse providers if specified
+        test_providers = None
+        if args.providers:
+            test_providers = [p.strip().lower() for p in args.providers.split(',')]
+            logger.info(f"Testing providers: {test_providers}")
+        
+        results = aggregator.test_all_connections(providers=test_providers)
 
         all_passed = True
         for provider, status in results.items():
@@ -181,12 +190,18 @@ def main():
         logger.info("Collecting from all providers: aws, gcp, azure")
 
     # Run aggregation
+    logger.info("=" * 60)
+    logger.info("Starting cost aggregation...")
+    logger.info("=" * 60)
     try:
+        logger.info("About to call aggregate_and_store()...")
+        logger.info(f"Parameters: start_date={start_date}, end_date={end_date}, providers={providers}")
         stats = aggregator.aggregate_and_store(
             start_date=start_date,
             end_date=end_date,
             providers=providers
         )
+        logger.info("aggregate_and_store() completed successfully")
 
         # Print summary
         logger.info("=" * 60)
