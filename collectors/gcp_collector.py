@@ -38,9 +38,6 @@ class GCPCollector(BaseCollector):
     def _initialize_client(self):
         """Initialize GCP BigQuery client"""
         try:
-            # Set credentials path as environment variable
-            if self.config.credentials_path:
-                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = self.config.credentials_path
 
             # Create credentials and BigQuery client
             credentials = service_account.Credentials.from_service_account_file(
@@ -121,14 +118,80 @@ class GCPCollector(BaseCollector):
         self.logger.info(f"Collecting GCP costs from {start_date} to {end_date}")
 
         try:
+            # First, verify the dataset exists
+            dataset_id = f"{self.config.project_id}.{self.config.bigquery_dataset}"
+            try:
+                dataset = self.client.get_dataset(dataset_id)
+                self.logger.debug(f"Found dataset: {dataset_id} (location: {dataset.location})")
+                
+                # List tables in the dataset to help diagnose issues
+                try:
+                    tables = list(self.client.list_tables(dataset_id))
+                    if tables:
+                        table_names = [t.table_id for t in tables]
+                        self.logger.debug(f"Found {len(tables)} table(s) in dataset: {', '.join(table_names)}")
+                        
+                        # Check if any tables match the billing export pattern
+                        billing_tables = [t for t in table_names if t.startswith('gcp_billing_export_v1_')]
+                        if not billing_tables:
+                            self.logger.warning(
+                                f"No billing export tables found matching pattern 'gcp_billing_export_v1_*'. "
+                                f"Found tables: {', '.join(table_names)}"
+                            )
+                            self.logger.warning(
+                                "If billing export was recently enabled, it may take up to 24 hours for tables to appear."
+                            )
+                    else:
+                        self.logger.warning(
+                            f"Dataset '{self.config.bigquery_dataset}' exists but contains no tables. "
+                            "Billing export may not be configured yet."
+                        )
+                except Exception as list_error:
+                    self.logger.debug(f"Could not list tables: {list_error}")
+                    
+            except GoogleAPIError as dataset_error:
+                error_msg = str(dataset_error)
+                if "not found" in error_msg.lower() or "notFound" in error_msg:
+                    self.logger.error(
+                        f"BigQuery dataset '{self.config.bigquery_dataset}' not found in project '{self.config.project_id}'"
+                    )
+                    # Try to list available datasets to help user
+                    try:
+                        datasets = list(self.client.list_datasets())
+                        if datasets:
+                            dataset_names = [d.dataset_id for d in datasets]
+                            self.logger.info(
+                                f"Available datasets in project '{self.config.project_id}': {', '.join(dataset_names)}"
+                            )
+                            self.logger.warning(
+                                f"Please set GCP_BIGQUERY_DATASET environment variable to one of the available datasets, "
+                                f"or create the dataset '{self.config.bigquery_dataset}' if billing export is not yet configured."
+                            )
+                        else:
+                            self.logger.warning(
+                                f"No datasets found in project '{self.config.project_id}'. "
+                                f"Please enable BigQuery billing export first."
+                            )
+                    except Exception as list_error:
+                        self.logger.debug(f"Could not list datasets: {list_error}")
+                    
+                    self.logger.warning(
+                        "Make sure billing export is enabled and configured correctly. "
+                        "See: https://cloud.google.com/billing/docs/how-to/export-data-bigquery"
+                    )
+                    return []
+                else:
+                    # Re-raise if it's a different error
+                    raise
+
             # Query BigQuery billing export for daily service-level costs
             # This query properly handles CUD costs, savings programs, and credits
             # Costs take a few hours to show up in BigQuery export, might take longer than 24 hours
 
             # Format dates for the query (YYYY-MM-DD format with timezone)
-            start_datetime = f"{start_date.strftime('%Y-%m-%d')}T00:00:00 US/Pacific"
+            start_datetime = f"{start_date.strftime('%Y-%m-%d')}T00:00:00Z"
             # Add one day to end_date for exclusive upper bound
-            end_datetime = f"{(end_date + timedelta(days=1)).strftime('%Y-%m-%d')}T00:00:00 US/Pacific"
+            end_datetime = f"{(end_date + timedelta(days=1)).strftime('%Y-%m-%d')}T00:00:00Z"
 
             query = f"""
                 WITH
@@ -167,20 +230,20 @@ class GCPCollector(BaseCollector):
                   WHERE
                     cost_type != 'tax'
                     AND cost_type != 'adjustment'
-                    AND usage_start_time >= '{start_datetime}'
-                    AND usage_start_time < '{end_datetime}' )
+                    AND usage_start_time >= TIMESTAMP('{start_datetime}')
+                    AND usage_start_time < TIMESTAMP('{end_datetime}'))
                 SELECT
                   DATE(TIMESTAMP_TRUNC(usage_start_time, Day, 'US/Pacific')) AS usage_date,
                   service.description AS service_name,
-                  (SUM(CAST(cost AS NUMERIC)) + SUM(CAST(cud_credits AS NUMERIC)) + SUM(CAST(other_savings AS NUMERIC)))
-                    / (MAX(currency_conversion_rate) * 1.0) AS cost_usd
+                  SUM(CAST(cost AS NUMERIC)) + SUM(CAST(cud_credits AS NUMERIC)) + SUM(CAST(other_savings AS NUMERIC))
+                    AS cost_usd
                 FROM
                   cost_data
                 GROUP BY
                   usage_date,
                   service_name
                 HAVING
-                  cost_usd > 0
+                  ABS(cost_usd) > 0.01
                 ORDER BY
                   usage_date DESC,
                   cost_usd DESC
@@ -209,10 +272,30 @@ class GCPCollector(BaseCollector):
 
         except GoogleAPIError as e:
             error_msg = str(e)
-            if "does not match any table" in error_msg:
+            if "does not match any table" in error_msg or "not match any table" in error_msg:
                 self.logger.warning(
-                    "GCP billing export tables not found. "
+                    "GCP billing export tables not found matching pattern 'gcp_billing_export_v1_*'. "
                     "It can take up to 24 hours for data to appear after enabling export."
+                )
+                # Try to list actual tables to help diagnose
+                try:
+                    dataset_id = f"{self.config.project_id}.{self.config.bigquery_dataset}"
+                    tables = list(self.client.list_tables(dataset_id))
+                    if tables:
+                        table_names = [t.table_id for t in tables]
+                        self.logger.info(f"Found tables in dataset: {', '.join(table_names)}")
+                        self.logger.warning(
+                            "If you see tables with different names, the billing export may use a different format. "
+                            "Check your GCP Console billing export configuration."
+                        )
+                except Exception as list_error:
+                    self.logger.debug(f"Could not list tables for diagnostics: {list_error}")
+            elif "not found" in error_msg.lower() or "notFound" in error_msg:
+                # Dataset not found error - already handled above, but catch here too
+                self.logger.error(f"Failed to collect GCP costs via BigQuery: {e}")
+                self.logger.warning(
+                    "Make sure billing export is enabled and configured correctly. "
+                    "See: https://cloud.google.com/billing/docs/how-to/export-data-bigquery"
                 )
             else:
                 self.logger.error(f"Failed to collect GCP costs via BigQuery: {e}")

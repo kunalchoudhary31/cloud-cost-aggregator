@@ -100,8 +100,7 @@ class Config:
         return GCPConfig(
             billing_account_id=os.getenv('GCP_BILLING_ACCOUNT_ID', ''),
             project_id=os.getenv('GCP_PROJECT_ID', ''),
-            credentials_path=os.getenv('GCP_CREDENTIALS_PATH',
-                                      os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')),
+            credentials_path=os.getenv('GCP_CREDENTIALS_PATH', ''),
             bigquery_dataset=os.getenv('GCP_BIGQUERY_DATASET', 'billing_export')
         )
 
@@ -158,7 +157,7 @@ class Config:
         if not self.gcp.project_id:
             errors.append("GCP_PROJECT_ID is required")
         if not self.gcp.credentials_path:
-            errors.append("GCP_CREDENTIALS_PATH or GOOGLE_APPLICATION_CREDENTIALS is required")
+            errors.append("GCP_CREDENTIALS_PATH is required")
 
         # Validate Azure config
         # For paid accounts: need service principal credentials
