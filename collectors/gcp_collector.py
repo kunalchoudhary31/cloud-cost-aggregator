@@ -272,7 +272,31 @@ class GCPCollector(BaseCollector):
 
         except GoogleAPIError as e:
             error_msg = str(e)
-            if "does not match any table" in error_msg or "not match any table" in error_msg:
+            if "does not have a schema" in error_msg.lower():
+                self.logger.warning(
+                    "GCP billing export table exists but has no schema (empty table). "
+                    "This usually means billing export is configured but hasn't received data yet."
+                )
+                # Extract table name from error if possible
+                if "gcp_billing_export_v1_" in error_msg:
+                    # Try to extract the table name
+                    import re
+                    table_match = re.search(r'gcp_billing_export_v1_\w+', error_msg)
+                    if table_match:
+                        table_name = table_match.group(0)
+                        self.logger.info(f"Found empty table: {table_name}")
+                self.logger.warning(
+                    "Billing export tables are created when you enable export, but they remain empty until "
+                    "GCP starts exporting billing data. This can take up to 24-48 hours after enabling export."
+                )
+                self.logger.info(
+                    "To verify billing export is working:\n"
+                    "  1. Go to GCP Console > Billing > Export\n"
+                    "  2. Check that export is enabled and pointing to the correct BigQuery dataset\n"
+                    "  3. Wait for billing data to appear (usually within 24-48 hours)"
+                )
+                return []
+            elif "does not match any table" in error_msg or "not match any table" in error_msg:
                 self.logger.warning(
                     "GCP billing export tables not found matching pattern 'gcp_billing_export_v1_*'. "
                     "It can take up to 24 hours for data to appear after enabling export."
